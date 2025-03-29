@@ -9,10 +9,12 @@ const { SESClient, SendEmailCommand } = require("@aws-sdk/client-ses");
 
 dotenv.config();
 
-const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-
 admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
+  credential: admin.credential.cert({
+    project_id: process.env.FIREBASE_PROJECT_ID,
+    private_key: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n"), // Convert to multiline
+    client_email: process.env.FIREBASE_CLIENT_EMAIL,
+  }),
 });
 
 const db = admin.firestore();
