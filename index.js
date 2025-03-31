@@ -72,6 +72,29 @@ async function fetchInvestorEmails(listId) {
   }
 }
 
+async function storeSentEmailMetadata({
+  campaignId,
+  sender,
+  recipientEmails,
+  subject,
+  sentAt,
+}) {
+  await db.collection("emailTracking").doc(campaignId).set(
+    {
+      sender,
+      recipientEmails,
+      subject,
+      sentAt,
+      sentCount: recipientEmails.length,
+      openedCount: 0,
+      bouncedCount: 0,
+      spamCount: 0,
+      unreadCount: recipientEmails.length,
+    },
+    { merge: true }
+  );
+}
+
 app.post("/clients", async (req, res) => {
   try {
     // Create client object
@@ -617,15 +640,64 @@ app.delete("/campaign/:id", async (req, res) => {
 });
 
 // API to send email
+// app.post("/send-email", async (req, res) => {
+//   const { campaignId, content, recipients, sender, subject, topic } = req.body;
+
+//   // Validate required fields
+//   if (!campaignId || !content?.html || !recipients || !sender || !subject) {
+//     return res.status(400).json({ message: "Missing required fields" });
+//   }
+
+//   // Fetch investor emails from Firestore
+//   const recipientEmails = await fetchInvestorEmails(recipients);
+//   if (recipientEmails.length === 0) {
+//     return res
+//       .status(400)
+//       .json({ message: "No valid recipient emails found in Firestore" });
+//   }
+
+//   const params = {
+//     Source: sender,
+//     Destination: {
+//       ToAddresses: recipientEmails, // Emails fetched from Firestore
+//     },
+//     Message: {
+//       Subject: {
+//         Data: subject,
+//       },
+//       Body: {
+//         Html: {
+//           Data: content.html, // HTML content from request
+//         },
+//       },
+//     },
+//   };
+
+//   try {
+//     const command = new SendEmailCommand(params);
+//     const result = await sesClient.send(command);
+//     res.status(200).json({
+//       message: "Campaign email sent successfully",
+//       campaignId,
+//       recipients: recipientEmails,
+//       result,
+//     });
+//   } catch (error) {
+//     console.error("Error sending campaign email:", error);
+//     res
+//       .status(500)
+//       .json({ message: "Failed to send campaign email", error: error.message });
+//   }
+// });
+
+// Send Email with Tracking
 app.post("/send-email", async (req, res) => {
   const { campaignId, content, recipients, sender, subject, topic } = req.body;
 
-  // Validate required fields
   if (!campaignId || !content?.html || !recipients || !sender || !subject) {
     return res.status(400).json({ message: "Missing required fields" });
   }
 
-  // Fetch investor emails from Firestore
   const recipientEmails = await fetchInvestorEmails(recipients);
   if (recipientEmails.length === 0) {
     return res
@@ -633,10 +705,15 @@ app.post("/send-email", async (req, res) => {
       .json({ message: "No valid recipient emails found in Firestore" });
   }
 
+  const trackingPixel = `<img src="https://send-email-server-wdia.onrender.com/track-open?campaignId=${campaignId}&recipient=${encodeURIComponent(
+    recipientEmails.join(",")
+  )}" width="1" height="1" style="display:none;" />`;
+  const emailContent = `${content.html}${trackingPixel}`;
+
   const params = {
     Source: sender,
     Destination: {
-      ToAddresses: recipientEmails, // Emails fetched from Firestore
+      ToAddresses: recipientEmails,
     },
     Message: {
       Subject: {
@@ -644,15 +721,25 @@ app.post("/send-email", async (req, res) => {
       },
       Body: {
         Html: {
-          Data: content.html, // HTML content from request
+          Data: emailContent,
         },
       },
     },
+    Tags: [{ Name: "campaignId", Value: campaignId }],
   };
 
   try {
     const command = new SendEmailCommand(params);
     const result = await sesClient.send(command);
+
+    await storeSentEmailMetadata({
+      campaignId,
+      sender,
+      recipientEmails,
+      subject,
+      sentAt: new Date().toISOString(),
+    });
+
     res.status(200).json({
       message: "Campaign email sent successfully",
       campaignId,
@@ -664,6 +751,128 @@ app.post("/send-email", async (req, res) => {
     res
       .status(500)
       .json({ message: "Failed to send campaign email", error: error.message });
+  }
+});
+
+// Track Email Opens
+app.get("/track-open", async (req, res) => {
+  const { campaignId } = req.query;
+
+  try {
+    const emailDoc = db.collection("emailTracking").doc(campaignId);
+    await emailDoc.update({
+      openedCount: admin.firestore.FieldValue.increment(1),
+      unreadCount: admin.firestore.FieldValue.increment(-1),
+    });
+    res.sendStatus(200);
+  } catch (error) {
+    console.error("Error tracking email open:", error);
+    res.sendStatus(500);
+  }
+});
+
+// SNS Endpoint for Bounce/Spam Events
+app.post("/sns-email-events", async (req, res) => {
+  const message = JSON.parse(req.body.Message || "{}");
+
+  if (message.eventType === "Bounce") {
+    const campaignId = message.mail?.tags?.campaignId?.[0];
+    if (campaignId) {
+      await db
+        .collection("emailTracking")
+        .doc(campaignId)
+        .update({
+          bouncedCount: admin.firestore.FieldValue.increment(1),
+        });
+    }
+  } else if (message.eventType === "Complaint") {
+    const campaignId = message.mail?.tags?.campaignId?.[0];
+    if (campaignId) {
+      await db
+        .collection("emailTracking")
+        .doc(campaignId)
+        .update({
+          spamCount: admin.firestore.FieldValue.increment(1),
+        });
+    }
+  }
+
+  res.sendStatus(200);
+});
+
+// GET Stats for a Single Campaign
+app.get("/email-stats/:campaignId", async (req, res) => {
+  const { campaignId } = req.params;
+
+  try {
+    const doc = await db.collection("emailTracking").doc(campaignId).get();
+    if (!doc.exists) {
+      return res.status(404).json({ message: "Campaign stats not found" });
+    }
+
+    const data = doc.data();
+    res.status(200).json({
+      campaignId,
+      sender: data.sender,
+      subject: data.subject,
+      sentAt: data.sentAt,
+      stats: {
+        sent: data.sentCount || 0,
+        opened: data.openedCount || 0,
+        bounced: data.bouncedCount || 0,
+        spammed: data.spamCount || 0,
+        unread: data.unreadCount || 0,
+      },
+    });
+  } catch (error) {
+    console.error("Error fetching email stats:", error);
+    res
+      .status(500)
+      .json({ message: "Failed to fetch stats", error: error.message });
+  }
+});
+
+// New GET API to Retrieve All Email Stats
+app.get("/email-stats", async (req, res) => {
+  try {
+    const snapshot = await db.collection("emailTracking").get();
+
+    if (snapshot.empty) {
+      return res.status(200).json({
+        message: "No email campaigns found",
+        totalCampaigns: 0,
+        data: [],
+      });
+    }
+
+    const campaigns = snapshot.docs.map((doc) => {
+      const data = doc.data();
+      return {
+        campaignId: doc.id,
+        sender: data.sender,
+        subject: data.subject,
+        sentAt: data.sentAt,
+        stats: {
+          sent: data.sentCount || 0,
+          opened: data.openedCount || 0,
+          bounced: data.bouncedCount || 0,
+          spammed: data.spamCount || 0,
+          unread: data.unreadCount || 0,
+        },
+      };
+    });
+
+    res.status(200).json({
+      message: "Successfully retrieved all email stats",
+      totalCampaigns: campaigns.length,
+      data: campaigns,
+    });
+  } catch (error) {
+    console.error("Error fetching all email stats:", error);
+    res.status(500).json({
+      message: "Failed to fetch all email stats",
+      error: error.message,
+    });
   }
 });
 
