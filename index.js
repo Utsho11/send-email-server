@@ -90,6 +90,7 @@ async function storeSentEmailMetadata({
       bouncedCount: 0,
       spamCount: 0,
       unreadCount: recipientEmails.length,
+      openedBy: [], // New field to track unique opens
     },
     { merge: true }
   );
@@ -705,32 +706,39 @@ app.post("/send-email", async (req, res) => {
       .json({ message: "No valid recipient emails found in Firestore" });
   }
 
-  const trackingPixel = `<img src="https://send-email-server-wdia.onrender.com/track-open?campaignId=${campaignId}&recipient=${encodeURIComponent(
-    recipientEmails.join(",")
-  )}" width="1" height="1" style="display:none;" />`;
-  const emailContent = `${content.html}${trackingPixel}`;
-
-  const params = {
-    Source: sender,
-    Destination: {
-      ToAddresses: recipientEmails,
-    },
-    Message: {
-      Subject: {
-        Data: subject,
-      },
-      Body: {
-        Html: {
-          Data: emailContent,
-        },
-      },
-    },
-    Tags: [{ Name: "campaignId", Value: campaignId }],
-  };
+  const baseUrl = process.env.BASE_URL || "http://localhost:5000";
+  const results = [];
 
   try {
-    const command = new SendEmailCommand(params);
-    const result = await sesClient.send(command);
+    // Send individual emails
+    for (const recipient of recipientEmails) {
+      const trackingPixel = `<img src="${baseUrl}/track-open?campaignId=${campaignId}&recipient=${encodeURIComponent(
+        recipient
+      )}" width="1" height="1" style="display:none;" />`;
+      const emailContent = `${content.html}${trackingPixel}`;
+
+      const params = {
+        Source: sender,
+        Destination: {
+          ToAddresses: [recipient], // One email per recipient
+        },
+        Message: {
+          Subject: {
+            Data: subject,
+          },
+          Body: {
+            Html: {
+              Data: emailContent,
+            },
+          },
+        },
+        Tags: [{ Name: "campaignId", Value: campaignId }],
+      };
+
+      const command = new SendEmailCommand(params);
+      const result = await sesClient.send(command);
+      results.push(result);
+    }
 
     await storeSentEmailMetadata({
       campaignId,
@@ -741,29 +749,48 @@ app.post("/send-email", async (req, res) => {
     });
 
     res.status(200).json({
-      message: "Campaign email sent successfully",
+      message: "Campaign emails sent successfully",
       campaignId,
       recipients: recipientEmails,
-      result,
+      results,
     });
   } catch (error) {
-    console.error("Error sending campaign email:", error);
-    res
-      .status(500)
-      .json({ message: "Failed to send campaign email", error: error.message });
+    console.error("Error sending campaign emails:", error);
+    res.status(500).json({
+      message: "Failed to send campaign emails",
+      error: error.message,
+    });
   }
 });
 
 // Track Email Opens
 app.get("/track-open", async (req, res) => {
-  const { campaignId } = req.query;
+  const { campaignId, recipient } = req.query;
+
+  if (!campaignId) {
+    return res.status(400).json({ message: "campaignId is required" });
+  }
 
   try {
-    const emailDoc = db.collection("emailTracking").doc(campaignId);
-    await emailDoc.update({
-      openedCount: admin.firestore.FieldValue.increment(1),
-      unreadCount: admin.firestore.FieldValue.increment(-1),
-    });
+    const emailDocRef = db.collection("emailTracking").doc(campaignId);
+    const emailDoc = await emailDocRef.get();
+
+    if (!emailDoc.exists) {
+      return res.status(404).json({ message: "Campaign not found" });
+    }
+
+    const data = emailDoc.data();
+    const openedBy = data.openedBy || [];
+
+    // If recipient is provided and hasn’t opened it yet
+    if (recipient && !openedBy.includes(recipient)) {
+      await emailDocRef.update({
+        openedCount: admin.firestore.FieldValue.increment(1),
+        unreadCount: admin.firestore.FieldValue.increment(-1),
+        openedBy: admin.firestore.FieldValue.arrayUnion(recipient),
+      });
+    }
+
     res.sendStatus(200);
   } catch (error) {
     console.error("Error tracking email open:", error);
