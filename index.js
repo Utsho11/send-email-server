@@ -9,18 +9,16 @@ const { SESClient, SendEmailCommand } = require("@aws-sdk/client-ses");
 
 dotenv.config();
 
+const serviceAccount = require("./serviceAccountKey.json");
 admin.initializeApp({
-  credential: admin.credential.cert({
-    project_id: process.env.FIREBASE_PROJECT_ID,
-    private_key: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n"), // Convert to multiline
-    client_email: process.env.FIREBASE_CLIENT_EMAIL,
-  }),
+  credential: admin.credential.cert(serviceAccount),
 });
 
 const db = admin.firestore();
 
 const app = express();
 app.use(cors({ origin: "https://email-sender-1fae3.web.app" }));
+// app.use(cors({ origin: "http://localhost:5173" }));
 app.use(express.json());
 const upload = multer({ dest: "uploads/" });
 // Create a new document in Firestore
@@ -901,6 +899,10 @@ app.get("/email-stats", async (req, res) => {
       error: error.message,
     });
   }
+});
+
+app.get("/", (req, res) => {
+  res.send("Welcome to the Email Campaign API!");
 });
 
 // Start server
