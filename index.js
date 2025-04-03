@@ -20,7 +20,7 @@ admin.initializeApp({
 const db = admin.firestore();
 
 const app = express();
-app.use(cors("https://email-sender-1fae3.web.app"));
+app.use(cors({ origin: "https://email-sender-1fae3.web.app" }));
 app.use(express.json());
 const upload = multer({ dest: "uploads/" });
 // Create a new document in Firestore
@@ -905,4 +905,8 @@ app.get("/email-stats", async (req, res) => {
 
 // Start server
 const PORT = process.env.PORT || 5000;
+app.listen(PORT, "0.0.0.0", () =>
+  console.log(`Server running on port ${PORT}`)
+);
+
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
