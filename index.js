@@ -9,7 +9,11 @@ const { SESClient, SendEmailCommand } = require("@aws-sdk/client-ses");
 
 dotenv.config();
 
-const serviceAccount = require("./serviceAccountKey.json");
+const serviceAccount = {
+  projectId: process.env.FIREBASE_PROJECT_ID,
+  privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n"),
+  clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+};
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
 });
@@ -704,7 +708,8 @@ app.post("/send-email", async (req, res) => {
       .json({ message: "No valid recipient emails found in Firestore" });
   }
 
-  const baseUrl = process.env.BASE_URL || "http://localhost:5000";
+  const baseUrl =
+    process.env.BASE_URL || "https://send-email-server-wdia.onrender.com";
   const results = [];
 
   try {
