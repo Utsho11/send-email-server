@@ -1,6 +1,5 @@
 const express = require("express");
 const multer = require("multer");
-const fs = require("fs");
 const admin = require("firebase-admin");
 const cors = require("cors");
 const dotenv = require("dotenv");
@@ -9,24 +8,33 @@ const { SESClient, SendEmailCommand } = require("@aws-sdk/client-ses");
 
 dotenv.config();
 
+const app = express();
+
+// Firebase credentials from environment variables
 const serviceAccount = {
   projectId: process.env.FIREBASE_PROJECT_ID,
   privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n"),
   clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
 };
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-});
+
+// Initialize Firebase Admin SDK only if it hasn’t been initialized
+if (!admin.apps.length) {
+  admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount),
+  });
+}
 
 const db = admin.firestore();
 
-const app = express();
+// Middleware
 app.use(cors({ origin: "https://email-sender-1fae3.web.app" }));
 // app.use(cors({ origin: "http://localhost:5173" }));
 app.use(express.json());
-const upload = multer({ dest: "uploads/" });
-// Create a new document in Firestore
 
+// Configure multer to use /tmp directory (Vercel-compatible)
+const upload = multer({ dest: "/tmp" });
+
+// AWS SES Client
 const sesClient = new SESClient({
   region: process.env.AWS_REGION,
   credentials: {
@@ -35,12 +43,12 @@ const sesClient = new SESClient({
   },
 });
 
+// Fetch investor emails from Firestore
 async function fetchInvestorEmails(listId) {
   if (!listId || listId === "No Recipients") return [];
   const listIds = listId.split(",").map((id) => id.trim());
   const emails = [];
 
-  // Batch listIds into chunks of 10 (Firestore 'in' limit)
   const chunks = [];
   for (let i = 0; i < listIds.length; i += 10) {
     chunks.push(listIds.slice(i, i + 10));
@@ -56,17 +64,11 @@ async function fetchInvestorEmails(listId) {
         querySnapshot.forEach((doc) => {
           const data = doc.data();
           if (data["Partner Email"]) {
-            // Use exact field name from your object
             emails.push(data["Partner Email"]);
           }
         });
       }
     }
-
-    if (emails.length === 0) {
-      console.log("No partner emails found for listIds:", listIds);
-    }
-
     return emails;
   } catch (error) {
     console.error("Error fetching investor emails:", error);
@@ -74,6 +76,7 @@ async function fetchInvestorEmails(listId) {
   }
 }
 
+// Store email metadata in Firestore
 async function storeSentEmailMetadata({
   campaignId,
   sender,
@@ -92,24 +95,18 @@ async function storeSentEmailMetadata({
       bouncedCount: 0,
       spamCount: 0,
       unreadCount: recipientEmails.length,
-      openedBy: [], // New field to track unique opens
+      openedBy: [],
     },
     { merge: true }
   );
 }
 
+// Routes (unchanged logic, just ensuring compatibility)
 app.post("/clients", async (req, res) => {
   try {
-    // Create client object
-    const clientData = {
-      ...req.body,
-      createdAt: new Date(),
-    };
-
-    // Add to Firestore
+    const clientData = { ...req.body, createdAt: new Date() };
     const userRef = db.collection("clients").doc();
     await userRef.set(clientData);
-
     res
       .status(201)
       .json({ id: userRef.id, message: "Client added successfully" });
@@ -117,22 +114,15 @@ app.post("/clients", async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+
 app.post("/campaign", async (req, res) => {
   try {
-    // Create client object
-    const campaignData = {
-      ...req.body,
-      createdAt: new Date(),
-    };
-
-    // Add to Firestore
+    const campaignData = { ...req.body, createdAt: new Date() };
     const campaignRef = db.collection("campaignLists").doc();
     await campaignRef.set(campaignData);
-
-    res.status(201).json({
-      id: campaignRef.id,
-      message: "Campaign added successfully",
-    });
+    res
+      .status(201)
+      .json({ id: campaignRef.id, message: "Campaign added successfully" });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -141,42 +131,32 @@ app.post("/campaign", async (req, res) => {
 app.post("/contact-lists", async (req, res) => {
   try {
     const { listName } = req.body;
-
-    // Validate input
     if (!listName || typeof listName !== "string") {
       return res.status(400).json({
         success: false,
         message: "listName is required and must be a string",
       });
     }
-
-    // Check if listName already exists
     const querySnapshot = await db
       .collection("contactLists")
       .where("listName", "==", listName)
       .get();
-
     if (!querySnapshot.empty) {
       return res.status(409).json({
         success: false,
         message: `A contact list with the name "${listName}" already exists`,
       });
     }
-
-    // Save to Firestore if unique
     const docRef = await db.collection("contactLists").add({
-      listName: listName,
+      listName,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
-
-    // Respond with success
     res.status(201).json({
       success: true,
       message: "Contact list created successfully",
       id: docRef.id,
     });
   } catch (error) {
-    console.error("Error saving listName:", error);
     res.status(500).json({
       success: false,
       message: "Failed to save contact list",
@@ -187,88 +167,67 @@ app.post("/contact-lists", async (req, res) => {
 
 app.post("/investors", async (req, res) => {
   try {
-    // Get the array of investor data from request body
     const investorData = req.body;
-
-    // Validate input
     if (!Array.isArray(investorData) || investorData.length === 0) {
-      return res.status(400).json({
-        error: "Invalid request: Array of investor data is required",
-      });
+      return res
+        .status(400)
+        .json({ error: "Invalid request: Array of investor data is required" });
     }
-
-    // Array to store created document IDs
     const createdIds = [];
-
-    // Write each investor as a separate document
     for (const investor of investorData) {
-      // Validate each investor object
       if (!investor["Partner Email"] || !investor.listId) {
-        return res.status(400).json({
-          error: "Each investor must have partnerEmail and listId",
-        });
+        return res
+          .status(400)
+          .json({ error: "Each investor must have partnerEmail and listId" });
       }
-
       const investorRef = db.collection("investors").doc();
       await investorRef.set(investor);
       createdIds.push(investorRef.id);
     }
-
-    // Send success response
     res.status(201).json({
       ids: createdIds,
       message: `Successfully added ${createdIds.length} investors`,
     });
   } catch (error) {
-    console.error("Error adding investors:", error);
-    res.status(500).json({
-      error: "Failed to add investors",
-      details: error.message,
-    });
+    res
+      .status(500)
+      .json({ error: "Failed to add investors", details: error.message });
   }
 });
 
 app.post("/upload-csv", upload.single("file"), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: "No file uploaded" });
-
-  const { listId } = req.body; // Extract list ID
-
-  if (!listId) {
-    return res.status(400).json({ error: "listid is required" });
-  }
+  const { listId } = req.body;
+  if (!listId) return res.status(400).json({ error: "listId is required" });
 
   try {
-    // Read CSV file
-    const fileContent = await fs.promises.readFile(req.file.path, "utf-8");
-
-    // Parse CSV using PapaParse
+    const fileContent = await require("fs").promises.readFile(
+      req.file.path,
+      "utf-8"
+    );
     const { data, errors } = Papa.parse(fileContent, {
       header: true,
       skipEmptyLines: true,
     });
-
     if (errors.length > 0) {
       return res
         .status(400)
         .json({ error: "Invalid CSV format", details: errors });
     }
 
-    // Delete temp file asynchronously (non-blocking)
-    fs.unlink(req.file.path, (err) => {
+    require("fs").unlink(req.file.path, (err) => {
       if (err) console.error("Error deleting temp file:", err);
     });
 
     const collectionRef = db.collection("investors");
-    const batchSize = 500; // Firestore supports max 500 operations per batch
+    const batchSize = 500;
     let batch = db.batch();
     let counter = 0;
 
     for (let i = 0; i < data.length; i++) {
-      const newDocRef = collectionRef.doc(); // Generate a new document ID
-      batch.set(newDocRef, { listId: listId, ...data[i] }); // Add to batch
+      const newDocRef = collectionRef.doc();
+      batch.set(newDocRef, { listId, ...data[i] });
       counter++;
-
-      // If batch size reaches limit, commit and create a new batch
       if (counter === batchSize || i === data.length - 1) {
         await batch.commit();
         batch = db.batch();
@@ -281,7 +240,6 @@ app.post("/upload-csv", upload.single("file"), async (req, res) => {
       message: `CSV uploaded successfully! ${data.length} records inserted.`,
     });
   } catch (error) {
-    console.error("Error processing CSV upload:", error);
     res
       .status(500)
       .json({ error: "Failed to upload CSV", details: error.message });
@@ -709,7 +667,7 @@ app.post("/send-email", async (req, res) => {
   }
 
   const baseUrl =
-    process.env.BASE_URL || "https://send-email-server-wdia.onrender.com";
+    process.env.BASE_URL || "https://email-sender-server-gamma.vercel.app";
   const results = [];
 
   try {
@@ -910,8 +868,4 @@ app.get("/", (req, res) => {
   res.send("Welcome to the Email Campaign API!");
 });
 
-// Start server
-const PORT = 5000;
-app.listen(PORT, "0.0.0.0", () =>
-  console.log(`Server running on port ${PORT}`)
-);
+module.exports = app;
