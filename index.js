@@ -667,7 +667,7 @@ app.post("/send-email", async (req, res) => {
   }
 
   const baseUrl =
-    process.env.BASE_URL || "https://email-sender-server-gamma.vercel.app";
+    process.env.BASE_URL || "https://email-sender-server-rho.vercel.app";
   const results = [];
 
   try {
